@@ -1,0 +1,72 @@
+---
+- hosts: linux
+  become: true
+  tasks:
+  - name: Setup repository
+    yum_repository:
+      name: logstash-7.x
+      description: Elastic repository for 7.x packages
+      baseurl: https://artifacts.elastic.co/packages/7.x/yum
+      gpgcheck: yes
+      metadata_expire_filter: read-only:future
+      gpgkey: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+
+  - package:
+      name:
+      - logstash
+      - filebeat
+      - tmux
+      - java-11-openjdk-headless
+      state: present
+
+  - name: Create pipeline
+    become: true
+    copy:
+      dest: /etc/logstash/conf.d/local-logstash.conf
+      content: |
+        input {
+          beats {
+            port => "5044"
+          }
+        }
+        output {
+          file { path => "/home/vagrant/output" }
+        }
+
+  - name: Start logstash
+    shell: 'tmux new-session -d -s logstash "/usr/share/logstash/bin/logstash -f /etc/logstash/conf.d/local-logstash.conf"'
+
+- hosts: windows
+  tasks:
+
+    # https://docs.ansible.com/ansible/2.7/modules/win_package_module.html#win-package-module
+    # HKLM:Software\Microsoft\Windows\CurrentVersion\Uninstall
+    - name: install winlogbeat
+      win_package:
+        path: https://artifacts.elastic.co/downloads/beats/winlogbeat/winlogbeat-7.6.0-windows-x86_64.msi
+        state: present
+        product_id: '{2DE7C165-4793-5EE1-9DF0-372062953E2B}'
+
+    # https://stackoverflow.com/questions/32025776/how-to-get-ip-address-from-other-host-in-ansible
+    - name: Configuratie bouwen
+      win_copy:
+        dest: '%ProgramData%\Elastic\Beats\winlogbeat\winlogbeat.yml'
+        content: |
+          winlogbeat.event_logs:
+            - name: Application
+            - name: Security
+            - name: System
+
+          output.logstash:
+            hosts:
+              - {{ hostvars["linux"]["ansible_default_ipv4"]["address"] }}:5044
+
+          logging.to_files: true
+          logging.files:
+            path: C:\ProgramData\Elastic\Logs
+            logging.level: info
+
+    - name: restart Winlogbeat
+      win_service:
+        name: winlogbeat
+        state: restarted
