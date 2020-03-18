@@ -14,10 +14,28 @@
   - package:
       name:
       - logstash
+      - epel-release
       - filebeat
+      - elasticsearch
+      - kibana
       - tmux
       - java-11-openjdk-headless
       state: present
+
+  - name: Copy ca
+    copy:
+      src: "~/git/ansible/var/localhost/ca-cert"
+      dest: "/etc/logstash/ca-cert"
+
+  - name: Copy cert
+    copy:
+      src: "~/git/ansible/var/localhost/server-logstash-cert.pem"
+      dest: "/etc/logstash/server-logstash-cert.pem"
+
+  - name: Copy key
+    copy:
+      src: "~/git/ansible/var/localhost/server-logstash-key-pkcs8.pem"
+      dest: "/etc/logstash/server-logstash-key.pem"
 
   - name: Create pipeline
     become: true
@@ -27,14 +45,45 @@
         input {
           beats {
             port => "5044"
+            ssl => true
+            ssl_certificate_authorities => ["/etc/logstash/ca-cert"]
+            ssl_certificate => "/etc/logstash/server-logstash-cert.pem"
+            ssl_key => "/etc/logstash/server-logstash-key.pem"
+            ssl_verify_mode => "force_peer"
+          }
+        }
+        filter {
+          geoip {
+            source => "clientip"
           }
         }
         output {
           file { path => "/home/vagrant/output" }
+          elasticsearch {
+            hosts => [ "localhost:9200" ]
+          }
         }
 
+  - name: start elasticsearch
+    become: true
+    systemd:
+      name: "{{ item }}"
+      state: started
+    loop:
+    - elasticsearch
+    - kibana
+
   - name: Start logstash
-    shell: 'tmux new-session -d -s logstash "/usr/share/logstash/bin/logstash -f /etc/logstash/conf.d/local-logstash.conf"'
+    shell: 'tmux new-session -d -s logstash "/usr/share/logstash/bin/logstash -f /etc/logstash/conf.d/local-logstash.conf --config.reload.automatic"'
+    ignore_errors: true
+
+  - name: Create motd
+    become: true
+    copy:
+      dest: /etc/motd
+      content: |
+        http://localhost:5601/app/kibana
+
 
 - hosts: windows
   tasks:
@@ -47,6 +96,26 @@
         state: present
         product_id: '{2DE7C165-4793-5EE1-9DF0-372062953E2B}'
 
+    - name: ca-cert copy
+      win_copy:
+        dest: 'c:/programdata/Elastic/Beats/winlogbeat/ca-cert'
+        src: "~/git/ansible/var/localhost/ca-cert"
+
+    - name: clientcert
+      win_copy:
+        dest: 'c:/programdata/Elastic/Beats/winlogbeat/client-winlogbeat-cert.pem'
+        src: "~/git/ansible/var/localhost/client-winlogbeat-cert.pem"
+
+    - name: clientkey
+      win_copy:
+        dest: 'c:/programdata/Elastic/Beats/winlogbeat/client-winlogbeat-key.pem'
+        src: "~/git/ansible/var/localhost/client-winlogbeat-key.pem"
+    - name: Add hostname
+      win_hosts:
+        state: present
+        canonical_name: "{{ hostvars['linux']['ansible_hostname'] }}"
+        ip_address: "{{ hostvars['linux']['ansible_default_ipv4']['address'] }}"
+
     # https://stackoverflow.com/questions/32025776/how-to-get-ip-address-from-other-host-in-ansible
     - name: Configuratie bouwen
       win_copy:
@@ -57,9 +126,13 @@
             - name: Security
             - name: System
 
+          #hosts: [{{ hostvars["linux"]["ansible_default_ipv4"]["address"] }}:5044]
           output.logstash:
-            hosts:
-              - {{ hostvars["linux"]["ansible_default_ipv4"]["address"] }}:5044
+            hosts: [{{ hostvars["linux"]["ansible_hostname"] }}:5044]
+            ssl.certificate_authorities: ["c:/ProgramData/Elastic/Beats/winlogbeat/ca-cert"]
+            ssl.certificate: "c:/ProgramData/Elastic/Beats/winlogbeat/client-winlogbeat-cert.pem"
+            ssl.key: "c:/ProgramData/Elastic/Beats/winlogbeat/client-winlogbeat-key.pem"
+            ssl.verification_mode: full
 
           logging.to_files: true
           logging.files:
@@ -70,3 +143,4 @@
       win_service:
         name: winlogbeat
         state: restarted
+      ignore_errors: true
