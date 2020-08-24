@@ -28,7 +28,7 @@ Vagrant.configure("2") do |config|
 
   config.vm.define "linux" do |linux|
     linux.vm.box = "centos/7"
-    linux.vm.hostname = "linuxelastic"
+    linux.vm.hostname = "linux"
     linux.vm.network "forwarded_port", guest: 5601, host: 5601
   end
 

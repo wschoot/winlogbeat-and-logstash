@@ -24,18 +24,18 @@
 
   - name: Copy ca
     copy:
-      src: "~/git/ansible/var/localhost/ca-cert"
-      dest: "/etc/logstash/ca-cert"
+      src: "ca-cert.pem"
+      dest: "/etc/logstash/ca-cert.pem"
 
   - name: Copy cert
     copy:
-      src: "~/git/ansible/var/localhost/server-logstash-cert.pem"
-      dest: "/etc/logstash/server-logstash-cert.pem"
+      src: "logstash-cert.pem"
+      dest: "/etc/logstash/logstash-cert.pem"
 
   - name: Copy key
     copy:
-      src: "~/git/ansible/var/localhost/server-logstash-key-pkcs8.pem"
-      dest: "/etc/logstash/server-logstash-key.pem"
+      src: "logstash-key.pem"
+      dest: "/etc/logstash/logstash-key.pem"
 
   - name: Create pipeline
     become: true
@@ -46,9 +46,9 @@
           beats {
             port => "5044"
             ssl => true
-            ssl_certificate_authorities => ["/etc/logstash/ca-cert"]
-            ssl_certificate => "/etc/logstash/server-logstash-cert.pem"
-            ssl_key => "/etc/logstash/server-logstash-key.pem"
+            ssl_certificate_authorities => ["/etc/logstash/ca-cert.pem"]
+            ssl_certificate => "/etc/logstash/logstash-cert.pem"
+            ssl_key => "/etc/logstash/logstash-key.pem"
             ssl_verify_mode => "force_peer"
           }
         }
@@ -98,18 +98,25 @@
 
     - name: ca-cert copy
       win_copy:
-        dest: 'c:/programdata/Elastic/Beats/winlogbeat/ca-cert'
-        src: "~/git/ansible/var/localhost/ca-cert"
+        dest: 'c:/programdata/Elastic/Beats/winlogbeat/ca-cert.pem'
+        src: "ca-cert.pem"
 
     - name: clientcert
       win_copy:
-        dest: 'c:/programdata/Elastic/Beats/winlogbeat/client-winlogbeat-cert.pem'
-        src: "~/git/ansible/var/localhost/client-winlogbeat-cert.pem"
+        dest: 'c:/programdata/Elastic/Beats/winlogbeat/winlogbeat-cert.pem'
+        src: "winlogbeat-cert.pem"
 
     - name: clientkey
       win_copy:
-        dest: 'c:/programdata/Elastic/Beats/winlogbeat/client-winlogbeat-key.pem'
-        src: "~/git/ansible/var/localhost/client-winlogbeat-key.pem"
+        dest: 'c:/programdata/Elastic/Beats/winlogbeat/winlogbeat-key.pem'
+        src: "winlogbeat-key.pem"
+
+    - name: Add hostname (centos-01)
+      win_hosts:
+        state: present
+        canonical_name: "centos-01"
+        ip_address: "{{ hostvars['linux']['ansible_default_ipv4']['address'] }}"
+
     - name: Add hostname
       win_hosts:
         state: present
@@ -126,12 +133,11 @@
             - name: Security
             - name: System
 
-          #hosts: [{{ hostvars["linux"]["ansible_default_ipv4"]["address"] }}:5044]
           output.logstash:
             hosts: [{{ hostvars["linux"]["ansible_hostname"] }}:5044]
-            ssl.certificate_authorities: ["c:/ProgramData/Elastic/Beats/winlogbeat/ca-cert"]
-            ssl.certificate: "c:/ProgramData/Elastic/Beats/winlogbeat/client-winlogbeat-cert.pem"
-            ssl.key: "c:/ProgramData/Elastic/Beats/winlogbeat/client-winlogbeat-key.pem"
+            ssl.certificate_authorities: ["c:/ProgramData/Elastic/Beats/winlogbeat/ca-cert.pem"]
+            ssl.certificate: "c:/ProgramData/Elastic/Beats/winlogbeat/winlogbeat-cert.pem"
+            ssl.key: "c:/ProgramData/Elastic/Beats/winlogbeat/winlogbeat-key.pem"
             ssl.verification_mode: full
 
           logging.to_files: true
