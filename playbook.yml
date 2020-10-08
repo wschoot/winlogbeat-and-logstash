@@ -1,5 +1,182 @@
 ---
 - hosts: linux
+  connection: local
+  vars:
+    certificates:
+      country: NL
+      organization: ACME corp
+      organizationalunit: ACME corp Unified Platform
+      keyalgo: rsa
+      keysize: 2048
+    cfssl_server_ca_generated_config:
+      cn: "Automatic Generated CA"
+      algo: rsa # Optional, default rsa
+      size: 2048 # Optional, default 2048
+      country: NL
+      organization: ACME corp
+      organizationalunit: ACME corp Unified Platform
+    caconfig:
+      signing:
+        default:
+          expiry: 262800h
+        profiles:
+          client:
+            expiry: 43800h
+            usages:
+            - signing
+            - key encipherment
+            - client auth
+          intermediate:
+            ca_constraint:
+              is_ca: true
+              max_path_len: 1
+            expiry: 262800h
+            usages:
+            - digital signature
+            - signing
+            - key encipherment
+            - cert sign
+            - crl sign
+          server:
+            expiry: 43800h
+            usages:
+            - signing
+            - key encipherment
+            - client auth
+            - server auth
+
+  tasks:
+  - name: set vars between plays
+    set_fact:
+      log: /home/vagrant/output
+      servername:
+        - "{{ inventory_hostname }}"
+
+  - name: Download cfssl
+    get_url:
+      url: https://github.com/cloudflare/cfssl/releases/download/v1.4.1/cfssl_1.4.1_linux_amd64
+      checksum: sha256:d01a26bc88851aab4c986e820e7b3885cedf1316a9c26a98fbba83105cfd7b87
+      dest: "$PWD/cfssl"
+      mode: u+rwx
+
+  - name: Create CA CSR
+    copy:
+      dest: ca-csr.json
+      content: |
+        {
+          "CN": "{{ cfssl_server_ca_generated_config.cn }}",
+          "key": {
+            "algo": "{{ cfssl_server_ca_generated_config.algo | default('rsa') }}",
+            "size": {{ cfssl_server_ca_generated_config.size | default('2048') }}
+          },
+          "names": [
+            {
+              "C": "{{ cfssl_server_ca_generated_config.country }}",
+              "O": "{{ cfssl_server_ca_generated_config.organization }}",
+              "OU": "{{ cfssl_server_ca_generated_config.organizationalunit }}"
+            }
+          ]
+        }
+
+  - name: Generate CA CSR
+    changed_when: false
+    command: "$PWD/cfssl genkey -initca ca-csr.json"
+    register: cfssl
+
+  - name: Save CA cert
+    copy:
+      content: "{{ (cfssl.stdout_lines[0]|from_json).cert }}"
+      dest: ca-cert.pem
+
+  - name: Save CA key
+    copy:
+      content: "{{ (cfssl.stdout_lines[0]|from_json).key }}"
+      mode: 0400
+      dest: ca-key.pem
+
+  - name: Set ca config
+    copy:
+      dest: ca-config.json
+      mode: 0444
+      content: "{{ caconfig|to_nice_json }}"
+
+  - name: Create certificate CSR
+    copy:
+      dest: "{{ item }}-csr.json"
+      content: |
+        {
+          "hosts": [ {{ item | list | join | to_nice_json(indent=8) }} ],
+          "CN": "{{ item }}",
+          "key": {
+              "algo": "{{ certificates.keyalgo }}",
+              "size": {{ certificates.keysize }}
+          },
+          "names": [{
+              "C": "{{ certificates.country }}",
+              "O": "{{ certificates.organization }}",
+              "OU": "{{ certificates.organizationalunit }}"
+          }]
+        }
+    with_items: "{{ groups['all'] }}"
+
+  - name: Generate server cert
+    changed_when: false
+    command: >
+      ./cfssl
+      gencert
+      -ca=ca-cert.pem
+      -ca-key=ca-key.pem
+      -config=ca-config.json
+      -profile=server
+      linux-csr.json
+    register: servercert
+
+  - name: Generate client cert
+    changed_when: false
+    command: >
+      ./cfssl
+      gencert
+      -ca=ca-cert.pem
+      -ca-key=ca-key.pem
+      -config=ca-config.json
+      -profile=client
+      win1-csr.json
+    register: clientcert1
+
+  - name: Generate client cert
+    changed_when: false
+    command: >
+      ./cfssl
+      gencert
+      -ca=ca-cert.pem
+      -ca-key=ca-key.pem
+      -config=ca-config.json
+      -profile=client
+      win2-csr.json
+    register: clientcert2
+
+  # Make sure the next plays can access these vars as well
+  # using this host hostsvars
+  - name: set facts to be used later
+    set_fact:
+      clientcerts:
+        win1:
+          clientcert: "{{ clientcert1 }}"
+        win2:
+          clientcert: "{{ clientcert2 }}"
+      servercert: "{{ servercert }}"
+      cfssl: "{{ cfssl }}"
+
+  - name: Set cert
+    copy:
+      dest: "{{ item }}-cert.pem"
+      mode: 0444
+      content: "{{ (hostvars['linux']['clientcerts'][item].clientcert.stdout_lines[0]|from_json).cert }}"
+    with_items:
+    - win1
+    - win2
+
+- hosts: linux
   become: true
   tasks:
   - name: Setup repository
@@ -20,22 +197,32 @@
       - kibana
       - tmux
       - java-11-openjdk-headless
+      - tcpdump
       state: present
 
   - name: Copy ca
     copy:
-      src: "ca-cert.pem"
+      content: "{{ (cfssl.stdout_lines[0]|from_json).cert }}"
       dest: "/etc/logstash/ca-cert.pem"
 
   - name: Copy cert
     copy:
-      src: "logstash-cert.pem"
+      content: "{{ (servercert.stdout_lines[0]|from_json).cert }}"
       dest: "/etc/logstash/logstash-cert.pem"
 
   - name: Copy key
     copy:
-      src: "logstash-key.pem"
-      dest: "/etc/logstash/logstash-key.pem"
+      content: "{{ (servercert.stdout_lines[0]|from_json).key }}"
+      dest: "/etc/logstash/logstash-key-pkcs1.pem"
+
+  - name: Convert key to pkcs8 which is needed for logstash
+    command: >
+      openssl
+      pkcs8
+      -in /etc/logstash/logstash-key-pkcs1.pem
+      -topk8
+      -nocrypt
+      -out /etc/logstash/logstash-key.pem
 
   - name: Create pipeline
     become: true
@@ -44,7 +231,7 @@
       content: |
         input {
           beats {
-            port => "5044"
+            port => 5044
             ssl => true
             ssl_certificate_authorities => ["/etc/logstash/ca-cert.pem"]
             ssl_certificate => "/etc/logstash/logstash-cert.pem"
@@ -58,11 +245,18 @@
           }
         }
         output {
-          file { path => "/home/vagrant/output" }
+          file {
+            path => "{{ log }}"
+          }
           elasticsearch {
             hosts => [ "localhost:9200" ]
           }
         }
+
+  - name: Create kibana config
+    lineinfile:
+      dest: /etc/kibana/kibana.yml
+      line: "server.host: \"{{ hostvars['linux']['ansible_default_ipv4']['address'] }}\""
 
   - name: start elasticsearch
     become: true
@@ -74,47 +268,70 @@
     - kibana
 
   - name: Start logstash
-    shell: 'tmux new-session -d -s logstash "/usr/share/logstash/bin/logstash -f /etc/logstash/conf.d/local-logstash.conf --config.reload.automatic"'
+    shell: |
+      tmux new-session -d -s logstash &&
+      tmux set-option remain-on-exit on &&
+      tmux new-window '/usr/share/logstash/bin/logstash -f /etc/logstash/conf.d/local-logstash.conf --config.reload.automatic' \; split-window 'tcpdump -i any -s0 -A dst port 5044' \; split-window 'tail -F {{ log }}'
     ignore_errors: true
 
+  - name: disable SElinux
+    selinux:
+      state: permissive
+      policy: targeted
   - name: Create motd
     become: true
     copy:
       dest: /etc/motd
       content: |
         http://localhost:5601/app/kibana
+        TERMINAL:
+          sudo -s -- tmux at
+        WEB:
+          http://{{ hostvars['linux']['ansible_default_ipv4']['address'] }}:5601/app/management/kibana/indexPatterns
+          http://{{ hostvars['linux']['ansible_default_ipv4']['address'] }}:5601/app/kibana
+          -> Explore on my own
+          Use Elasticsearch data -> Connect to your Elasticsearch index
+          -> Create index pattern
+          '*' -> Next Step
+          '@timestamp' -> Create index pattern
+          http://{{ hostvars['linux']['ansible_default_ipv4']['address'] }}:5601/app/discover
 
-
-- hosts: windows
+- hosts: win1, win2
   tasks:
+
+    - name: change power plan to high performance
+      win_power_plan:
+        name: high performance
 
     # https://docs.ansible.com/ansible/2.7/modules/win_package_module.html#win-package-module
     # HKLM:Software\Microsoft\Windows\CurrentVersion\Uninstall
     - name: install winlogbeat
       win_package:
-        path: https://artifacts.elastic.co/downloads/beats/winlogbeat/winlogbeat-7.6.0-windows-x86_64.msi
+        path: https://artifacts.elastic.co/downloads/beats/winlogbeat/winlogbeat-7.9.2-windows-x86_64.msi
         state: present
         product_id: '{2DE7C165-4793-5EE1-9DF0-372062953E2B}'
 
     - name: ca-cert copy
       win_copy:
+        content: "{{ (hostvars['linux'].cfssl.stdout_lines[0]|from_json).cert }}"
         dest: 'c:/programdata/Elastic/Beats/winlogbeat/ca-cert.pem'
-        src: "ca-cert.pem"
 
+    - debug:
+        var: hostvars['linux']['clientcerts'][inventory_hostname].clientcert.stdout_lines[0]
     - name: clientcert
       win_copy:
+        content: "{{ (hostvars['linux']['clientcerts'][inventory_hostname].clientcert.stdout_lines[0]|from_json).cert }}"
         dest: 'c:/programdata/Elastic/Beats/winlogbeat/winlogbeat-cert.pem'
-        src: "winlogbeat-cert.pem"
 
     - name: clientkey
       win_copy:
+        content: "{{ (hostvars['linux']['clientcerts'][inventory_hostname].clientcert.stdout_lines[0]|from_json).key }}"
         dest: 'c:/programdata/Elastic/Beats/winlogbeat/winlogbeat-key.pem'
-        src: "winlogbeat-key.pem"
 
     - name: Add hostname (centos-01)
       win_hosts:
         state: present
-        canonical_name: "centos-01"
+        canonical_name: "linux"
         ip_address: "{{ hostvars['linux']['ansible_default_ipv4']['address'] }}"
 
     - name: Add hostname
@@ -150,3 +367,17 @@
         name: winlogbeat
         state: restarted
       ignore_errors: true
+
+- hosts: linux
+  become: true
+  tasks:
+  - name: Add hosts
+    lineinfile:
+      dest: /etc/hosts
+      line: "{{ hostvars['win1']['ansible_host'] }} {{ hostvars['win1'].inventory_hostname }}"
+  - name: Add hosts
+    lineinfile:
+      dest: /etc/hosts
+      line: "{{ hostvars['win2']['ansible_host'] }} {{ hostvars['win2'].inventory_hostname }}"
+
+

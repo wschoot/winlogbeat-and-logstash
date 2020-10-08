@@ -22,5 +22,4 @@ vagrant ssh-config > ~/.ssh/vagrant
 
 # nu met forwarded porten
 #vagrant ssh linux -- -L 5601:localhost:5601
-rdesktop $(vagrant ssh-config windows | grep HostName | awk '{ print $2 }') -u vagrant -p vagrant
-
+rdesktop $(vagrant ssh-config win1 | grep HostName | awk '{ print $2 }') -u vagrant -p vagrant
